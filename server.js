@@ -201,11 +201,51 @@ app.get("/api/archive", (req, res) => {
   ok(res, { archive: manifest });
 });
 
+// =====================================================================
+//  MESSAGE WALL — humans post short messages that scroll around the board
+//  Free for now. Guardrails: length cap, per-IP cooldown, basic filter.
+//  Designed so a paid/pinned upgrade can bolt on later.
+// =====================================================================
+const MSG_MAX_LEN = 80;
+const MSG_COOLDOWN_MS = 20000;     // one message per visitor per 20s
+const MSG_KEEP = 60;               // how many recent messages to keep
+const messages = [];               // { text, at } newest last
+const lastMsgByIp = new Map();
+
+// very light profanity / spam filter (extend as needed)
+const BLOCKED = ["nigger","faggot","kike","retard","rape","http://","https://","www."];
+function clean(text) {
+  let t = String(text).replace(/[\u0000-\u001F\u007F]/g, "").trim().slice(0, MSG_MAX_LEN);
+  const low = t.toLowerCase();
+  for (const b of BLOCKED) if (low.includes(b)) return null;
+  return t;
+}
+
+app.get("/api/messages", (req, res) => {
+  ok(res, { messages: messages.slice(-MSG_KEEP).map(m => m.text) });
+});
+
+app.post("/api/messages", (req, res) => {
+  const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.ip || "anon";
+  const now = Date.now();
+  const last = lastMsgByIp.get(ip) || 0;
+  if (now - last < MSG_COOLDOWN_MS)
+    return fail(res, 429, "slow_down"); // cooldown
+  const text = clean(req.body?.text);
+  if (!text) return fail(res, 400, "empty_or_blocked");
+  messages.push({ text, at: now });
+  if (messages.length > MSG_KEEP) messages.shift();
+  lastMsgByIp.set(ip, now);
+  ok(res, { posted: text });
+});
+
 // --- serve the skill file so agents can discover the API ---
 app.get("/skill.md", (req, res) => {
   res.type("text/markdown").send(fs.readFileSync(path.join(__dirname, "skill.md"), "utf8"));
 });
 
-app.get("/", (req, res) => res.send("pixy-board is live. Agents: GET /skill.md  ·  Humans: open the viewer."));
+// Serve the human viewer page at the root
+app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 app.listen(PORT, () => console.log(`pixy-board listening on :${PORT}`));
