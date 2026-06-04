@@ -28,6 +28,25 @@ const PALETTE = [
   "#ff6b6b","#ffd93d","#a06cd5","#08415c","#cc2936","#6b8f71","#e0a458",
 ];
 
+// ---------- TEAMS & THEMES ----------
+// 3 teams, each maps to a palette index. Agents pick a team on entry.
+const TEAMS = [
+  { id: "ember",  name: "Ember",  color: 2 },   // #e94560 red
+  { id: "tide",   name: "Tide",   color: 6 },   // #16c79a teal
+  { id: "solar",  name: "Solar",  color: 4 },   // #f5a623 amber
+];
+function teamById(id){ return TEAMS.find(t => t.id === id); }
+
+// Themes rotate each season — gives every round a narrative.
+const THEMES = [
+  "claim the most connected territory for your team",
+  "build one shape together — biggest connected mass wins",
+  "draw something that represents you, then defend it",
+  "expand from a single seed — no scattering",
+  "leave your mark, hold your ground",
+  "make the board mean something before it wipes",
+];
+
 if (!fs.existsSync(ARCHIVE_DIR)) fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 
 // ---------- STATE ----------
@@ -49,20 +68,64 @@ function newChallenge() {
 
 function startSeason() {
   const id = crypto.randomBytes(8).toString("hex");
+  const theme = THEMES[Math.floor(Math.random() * THEMES.length)];
   season = {
     id,
     startedAt: Date.now(),
     endsAt: Date.now() + SEASON_MS,
-    board: new Int16Array(SIZE * SIZE).fill(-1),   // -1 = empty
-    agents: new Map(),       // token -> { name, pixels, lastPlace }
-    challenges: new Map(),   // challengeId -> answer (per request)
+    theme,
+    board: new Int16Array(SIZE * SIZE).fill(-1),   // -1 = empty, else palette index
+    owner: new Int8Array(SIZE * SIZE).fill(-1),     // -1 = none, else team index (0..2)
+    agents: new Map(),       // token -> { name, team, pixels, lastPlace }
+    challenges: new Map(),   // challengeId -> answer
     pixelCount: 0,
+    teamPixels: [0, 0, 0],   // running pixel count per team
+    lastWinner: null,
   };
-  console.log(`[season] started ${id} — ${SLOTS} slots, ends in 30m`);
+  console.log(`[season] started ${id} — theme: "${theme}"`);
+}
+
+// flood-fill: biggest connected blob for a given team (the win metric)
+function biggestBlob(teamIdx) {
+  const owner = season.owner;
+  const seen = new Uint8Array(SIZE * SIZE);
+  let best = 0;
+  const stack = [];
+  for (let i = 0; i < owner.length; i++) {
+    if (owner[i] !== teamIdx || seen[i]) continue;
+    let size = 0;
+    stack.length = 0;
+    stack.push(i);
+    seen[i] = 1;
+    while (stack.length) {
+      const idx = stack.pop();
+      size++;
+      const x = idx % SIZE, y = (idx / SIZE) | 0;
+      if (x > 0)        { const n = idx - 1;    if (owner[n] === teamIdx && !seen[n]) { seen[n] = 1; stack.push(n); } }
+      if (x < SIZE - 1) { const n = idx + 1;    if (owner[n] === teamIdx && !seen[n]) { seen[n] = 1; stack.push(n); } }
+      if (y > 0)        { const n = idx - SIZE; if (owner[n] === teamIdx && !seen[n]) { seen[n] = 1; stack.push(n); } }
+      if (y < SIZE - 1) { const n = idx + SIZE; if (owner[n] === teamIdx && !seen[n]) { seen[n] = 1; stack.push(n); } }
+    }
+    if (size > best) best = size;
+  }
+  return best;
+}
+
+function computeWinner() {
+  const blobs = TEAMS.map((t, i) => ({ team: t, blob: biggestBlob(i), pixels: season.teamPixels[i] }));
+  blobs.sort((a, b) => b.blob - a.blob || b.pixels - a.pixels);
+  const top = blobs[0];
+  return {
+    winner: top.blob > 0 ? top.team.name : null,
+    winnerId: top.blob > 0 ? top.team.id : null,
+    standings: blobs.map(b => ({ team: b.team.name, id: b.team.id, territory: b.blob, pixels: b.pixels })),
+  };
 }
 
 async function endSeason() {
   if (!season) return;
+  // ---- compute the winner before wiping ----
+  const result = computeWinner();
   // ---- archive as PNG ----
   try {
     const scale = 4;
@@ -87,7 +150,6 @@ async function endSeason() {
     const stamp = new Date(season.startedAt).toISOString().replace(/[:.]/g, "-");
     const file = path.join(ARCHIVE_DIR, `${stamp}_${season.id}.png`);
     fs.writeFileSync(file, PNG.sync.write(png));
-    // write/refresh manifest
     const manifest = fs.existsSync(path.join(ARCHIVE_DIR, "index.json"))
       ? JSON.parse(fs.readFileSync(path.join(ARCHIVE_DIR, "index.json")))
       : [];
@@ -97,13 +159,18 @@ async function endSeason() {
       startedAt: season.startedAt,
       pixels: season.pixelCount,
       agents: season.agents.size,
+      theme: season.theme,
+      winner: result.winner,
+      standings: result.standings,
     });
     fs.writeFileSync(path.join(ARCHIVE_DIR, "index.json"), JSON.stringify(manifest.slice(0, 500), null, 2));
-    console.log(`[season] archived ${season.id} (${season.pixelCount} px, ${season.agents.size} agents)`);
+    console.log(`[season] archived ${season.id} — winner: ${result.winner || "none"}`);
   } catch (e) {
     console.error("[archive] failed:", e.message);
   }
+  const prevWinner = result;
   startSeason();
+  season.lastWinner = prevWinner;   // carry last result into the new season for display
 }
 
 // season ticker
@@ -121,6 +188,11 @@ const fail = (res, code, reason) => res.status(code).json({ ok: false, reason })
 
 // --- status: what's happening right now ---
 app.get("/api/status", (req, res) => {
+  // live standings (cheap enough at 200x200, called every 2s)
+  const standings = TEAMS.map((t, i) => ({
+    team: t.name, id: t.id, color: t.color,
+    territory: biggestBlob(i), pixels: season.teamPixels[i],
+  })).sort((a, b) => b.territory - a.territory || b.pixels - a.pixels);
   ok(res, {
     season: season.id,
     size: SIZE,
@@ -130,6 +202,10 @@ app.get("/api/status", (req, res) => {
     secondsLeft: Math.max(0, Math.round((season.endsAt - Date.now()) / 1000)),
     pixelCount: season.pixelCount,
     palette: PALETTE,
+    theme: season.theme,
+    teams: TEAMS,
+    standings,
+    lastWinner: season.lastWinner || null,
   });
 });
 
@@ -146,52 +222,71 @@ app.get("/api/challenge", (req, res) => {
   if (season.agents.size >= SLOTS) return fail(res, 423, "season_full");
   const c = newChallenge();
   season.challenges.set(c.id, c.answer);
-  // challenges expire after 60s to keep the map clean
   setTimeout(() => season.challenges.delete(c.id), 60000);
-  ok(res, { challengeId: c.id, question: c.question, hint: "Reply with the integer answer to /api/enter" });
+  ok(res, {
+    challengeId: c.id,
+    question: c.question,
+    theme: season.theme,
+    teams: TEAMS.map(t => ({ id: t.id, name: t.name, color: t.color })),
+    hint: "POST answer + a team id to /api/enter",
+  });
 });
 
-// --- submit answer + claim a slot ---
+// --- submit answer + claim a slot (and pick a team) ---
 app.post("/api/enter", (req, res) => {
-  const { agent, challengeId, answer } = req.body || {};
+  const { agent, challengeId, answer, team } = req.body || {};
   if (!agent || !challengeId || answer === undefined) return fail(res, 400, "missing_fields");
   if (season.agents.size >= SLOTS) return fail(res, 423, "season_full");
   const correct = season.challenges.get(challengeId);
   if (correct === undefined) return fail(res, 410, "challenge_expired");
   if (Number(answer) !== correct) return fail(res, 403, "wrong_answer");
 
+  // resolve team: use requested one if valid, else auto-balance to smallest team
+  let teamIdx = TEAMS.findIndex(t => t.id === team);
+  if (teamIdx < 0) {
+    const counts = [0, 0, 0];
+    for (const a of season.agents.values()) counts[a.team]++;
+    teamIdx = counts.indexOf(Math.min(...counts));
+  }
+
   season.challenges.delete(challengeId);
   const token = crypto.randomBytes(16).toString("hex");
-  season.agents.set(token, { name: String(agent).slice(0, 40), pixels: 0, lastPlace: 0 });
+  season.agents.set(token, { name: String(agent).slice(0, 40), team: teamIdx, pixels: 0, lastPlace: 0 });
   ok(res, {
     token,
     season: season.id,
+    team: TEAMS[teamIdx].id,
+    teamName: TEAMS[teamIdx].name,
+    teamColor: TEAMS[teamIdx].color,
+    theme: season.theme,
     secondsLeft: Math.max(0, Math.round((season.endsAt - Date.now()) / 1000)),
     maxPixels: MAX_PIXELS_PER_AGENT,
-    message: "You're in. Draw before the reset.",
+    message: `You're on team ${TEAMS[teamIdx].name}. Theme: ${season.theme}. Draw before the reset.`,
   });
 });
 
-// --- place a pixel (the core rule) ---
+// --- place a pixel (the core rule; color is locked to your team) ---
 app.post("/api/place", (req, res) => {
-  const { token, x, y, color } = req.body || {};
+  const { token, x, y } = req.body || {};
   const ag = season.agents.get(token);
   if (!ag) return fail(res, 401, "not_in_season");
-  const px = Number(x), py = Number(y), c = Number(color);
+  const px = Number(x), py = Number(y);
   if (!Number.isInteger(px) || !Number.isInteger(py) || px < 0 || py < 0 || px >= SIZE || py >= SIZE)
     return fail(res, 400, "out_of_bounds");
-  if (!Number.isInteger(c) || c < 0 || c >= PALETTE.length) return fail(res, 400, "bad_color");
   if (ag.pixels >= MAX_PIXELS_PER_AGENT) return fail(res, 429, "agent_pixel_limit");
   if (Date.now() - ag.lastPlace < PLACE_COOLDOWN_MS) return fail(res, 429, "cooldown");
 
   const idx = py * SIZE + px;
   if (season.board[idx] >= 0) return fail(res, 409, "pixel_occupied"); // THE RULE
 
+  const c = TEAMS[ag.team].color;     // color is your team's color
   season.board[idx] = c;
+  season.owner[idx] = ag.team;
   season.pixelCount++;
+  season.teamPixels[ag.team]++;
   ag.pixels++;
   ag.lastPlace = Date.now();
-  ok(res, { placed: [px, py, c], yourPixels: ag.pixels, remaining: MAX_PIXELS_PER_AGENT - ag.pixels });
+  ok(res, { placed: [px, py, c], team: TEAMS[ag.team].id, yourPixels: ag.pixels, remaining: MAX_PIXELS_PER_AGENT - ag.pixels });
 });
 
 // --- archive list for the human gallery ---
@@ -249,75 +344,80 @@ app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 // =====================================================================
-//  HOUSE BOTS — keep the board alive between real agent visits.
-//  They join each season and draw shapes directly (no HTTP, in-process).
+//  HOUSE BOTS — keep the board alive AND demonstrate the team turf-war.
+//  Each team has a couple of bots that grow a connected mass from a home
+//  region, so the territory win-condition is visible without real agents.
 //  Set HOUSE_BOTS=off in env to disable once real agents show up.
 // =====================================================================
 const HOUSE_BOTS_ENABLED = process.env.HOUSE_BOTS !== "off";
 
+// home regions per team (roughly thirds of the board)
+const HOME = [
+  { x: 45,  y: 100 },  // team 0 (Ember) - left
+  { x: 100, y: 55  },  // team 1 (Tide)  - top
+  { x: 155, y: 145 },  // team 2 (Solar) - bottom-right
+];
 const HOUSE_BOTS = [
-  { name: "house.spiral",  style: "spiral",  color: 5,  budget: 130 },
-  { name: "house.builder", style: "builder", color: 6,  budget: 160 },
-  { name: "house.drift",   style: "drift",   color: 9,  budget: 140 },
-  { name: "house.bloom",   style: "bloom",   color: 2,  budget: 120 },
+  { name: "house.ember.a", team: 0, budget: 150 },
+  { name: "house.ember.b", team: 0, budget: 120 },
+  { name: "house.tide.a",  team: 1, budget: 150 },
+  { name: "house.tide.b",  team: 1, budget: 120 },
+  { name: "house.solar.a", team: 2, budget: 150 },
+  { name: "house.solar.b", team: 2, budget: 120 },
 ];
 
-// place a pixel directly into the current season (mirrors /api/place rules)
-function housePlace(x, y, colorIdx) {
+// place into the season honoring ownership + team color
+function housePlace(x, y, teamIdx) {
   if (!season) return false;
   if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return false;
   const idx = y * SIZE + x;
-  if (season.board[idx] >= 0) return false;   // respect the no-overwrite rule
-  season.board[idx] = colorIdx;
+  if (season.board[idx] >= 0) return false;   // no overwrite
+  season.board[idx] = TEAMS[teamIdx].color;
+  season.owner[idx] = teamIdx;
   season.pixelCount++;
+  season.teamPixels[teamIdx]++;
   return true;
 }
 
 function runHouseBots() {
   if (!HOUSE_BOTS_ENABLED || !season) return;
-  // only draw while there's time left and the board isn't saturated
   if (Date.now() >= season.endsAt) return;
 
   for (const bot of HOUSE_BOTS) {
-    // each bot keeps a little per-season state on the season object
     season._house = season._house || {};
+    const home = HOME[bot.team];
     const st = season._house[bot.name] || (season._house[bot.name] = {
       drawn: 0,
-      cx: 20 + Math.floor(Math.random() * (SIZE - 40)),
-      cy: 20 + Math.floor(Math.random() * (SIZE - 40)),
-      t: 0,
-      wx: 100, wy: 100,
+      // each bot grows a blob seeded near its team home
+      seedx: home.x + (Math.floor(Math.random()*30)-15),
+      seedy: home.y + (Math.floor(Math.random()*30)-15),
+      frontier: null,
     });
     if (st.drawn >= bot.budget) continue;
+    // initialize frontier from the seed
+    if (!st.frontier) {
+      st.frontier = [[Math.max(0,Math.min(SIZE-1,st.seedx)), Math.max(0,Math.min(SIZE-1,st.seedy))]];
+    }
 
-    // each tick, attempt a small burst of pixels
-    for (let k = 0; k < 4 && st.drawn < bot.budget; k++) {
-      let x, y;
-      if (bot.style === "spiral") {
-        const r = st.t * 0.7;
-        x = Math.round(st.cx + r * Math.cos(st.t * 0.35));
-        y = Math.round(st.cy + r * Math.sin(st.t * 0.35));
-        st.t++;
-        if (r > 30) { st.cx = 20 + Math.floor(Math.random()*(SIZE-40)); st.cy = 20 + Math.floor(Math.random()*(SIZE-40)); st.t = 0; }
-      } else if (bot.style === "builder") {
-        const w = 16;
-        x = st.cx + (st.t % w);
-        y = st.cy + Math.floor(st.t / w) % 12;
-        st.t++;
-        if (st.t > w * 12) { st.cx = 10 + Math.floor(Math.random()*(SIZE-30)); st.cy = 10 + Math.floor(Math.random()*(SIZE-30)); st.t = 0; }
-      } else if (bot.style === "bloom") {
-        // scattered plus-shapes
-        const shape = [[0,0],[1,0],[-1,0],[0,1],[0,-1]];
-        const s = shape[st.t % shape.length];
-        x = st.cx + s[0]; y = st.cy + s[1];
-        st.t++;
-        if (st.t % shape.length === 0) { st.cx = Math.floor(Math.random()*SIZE); st.cy = Math.floor(Math.random()*SIZE); }
-      } else { // drift: random walk
-        st.wx = Math.max(0, Math.min(SIZE-1, st.wx + (Math.floor(Math.random()*3)-1)));
-        st.wy = Math.max(0, Math.min(SIZE-1, st.wy + (Math.floor(Math.random()*3)-1)));
-        x = st.wx; y = st.wy;
+    // grow the connected mass outward (organic blob, not scatter)
+    for (let k = 0; k < 4 && st.drawn < bot.budget && st.frontier.length; k++) {
+      // pick a random frontier cell to expand from
+      const fi = Math.floor(Math.random() * st.frontier.length);
+      const [fx, fy] = st.frontier[fi];
+      // try to place it
+      if (housePlace(fx, fy, bot.team)) {
+        st.drawn++;
+        // add neighbors to frontier
+        const nbrs = [[fx+1,fy],[fx-1,fy],[fx,fy+1],[fx,fy-1]];
+        for (const [nx, ny] of nbrs) {
+          if (nx>=0&&ny>=0&&nx<SIZE&&ny<SIZE) {
+            const nidx = ny*SIZE+nx;
+            if (season.board[nidx] < 0) st.frontier.push([nx, ny]);
+          }
+        }
       }
-      if (housePlace(x, y, bot.color)) st.drawn++;
+      // remove the used frontier cell
+      st.frontier.splice(fi, 1);
     }
   }
 }
