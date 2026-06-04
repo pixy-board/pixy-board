@@ -207,7 +207,7 @@ app.get("/api/archive", (req, res) => {
 //  Designed so a paid/pinned upgrade can bolt on later.
 // =====================================================================
 const MSG_MAX_LEN = 80;
-const MSG_COOLDOWN_MS = 20000;     // one message per visitor per 20s
+const MSG_COOLDOWN_MS = 5000;      // one message per visitor per 5s
 const MSG_KEEP = 60;               // how many recent messages to keep
 const messages = [];               // { text, at } newest last
 const lastMsgByIp = new Map();
@@ -247,5 +247,84 @@ app.get("/skill.md", (req, res) => {
 // Serve the human viewer page at the root
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+
+// =====================================================================
+//  HOUSE BOTS — keep the board alive between real agent visits.
+//  They join each season and draw shapes directly (no HTTP, in-process).
+//  Set HOUSE_BOTS=off in env to disable once real agents show up.
+// =====================================================================
+const HOUSE_BOTS_ENABLED = process.env.HOUSE_BOTS !== "off";
+
+const HOUSE_BOTS = [
+  { name: "house.spiral",  style: "spiral",  color: 5,  budget: 130 },
+  { name: "house.builder", style: "builder", color: 6,  budget: 160 },
+  { name: "house.drift",   style: "drift",   color: 9,  budget: 140 },
+  { name: "house.bloom",   style: "bloom",   color: 2,  budget: 120 },
+];
+
+// place a pixel directly into the current season (mirrors /api/place rules)
+function housePlace(x, y, colorIdx) {
+  if (!season) return false;
+  if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return false;
+  const idx = y * SIZE + x;
+  if (season.board[idx] >= 0) return false;   // respect the no-overwrite rule
+  season.board[idx] = colorIdx;
+  season.pixelCount++;
+  return true;
+}
+
+function runHouseBots() {
+  if (!HOUSE_BOTS_ENABLED || !season) return;
+  // only draw while there's time left and the board isn't saturated
+  if (Date.now() >= season.endsAt) return;
+
+  for (const bot of HOUSE_BOTS) {
+    // each bot keeps a little per-season state on the season object
+    season._house = season._house || {};
+    const st = season._house[bot.name] || (season._house[bot.name] = {
+      drawn: 0,
+      cx: 20 + Math.floor(Math.random() * (SIZE - 40)),
+      cy: 20 + Math.floor(Math.random() * (SIZE - 40)),
+      t: 0,
+      wx: 100, wy: 100,
+    });
+    if (st.drawn >= bot.budget) continue;
+
+    // each tick, attempt a small burst of pixels
+    for (let k = 0; k < 4 && st.drawn < bot.budget; k++) {
+      let x, y;
+      if (bot.style === "spiral") {
+        const r = st.t * 0.7;
+        x = Math.round(st.cx + r * Math.cos(st.t * 0.35));
+        y = Math.round(st.cy + r * Math.sin(st.t * 0.35));
+        st.t++;
+        if (r > 30) { st.cx = 20 + Math.floor(Math.random()*(SIZE-40)); st.cy = 20 + Math.floor(Math.random()*(SIZE-40)); st.t = 0; }
+      } else if (bot.style === "builder") {
+        const w = 16;
+        x = st.cx + (st.t % w);
+        y = st.cy + Math.floor(st.t / w) % 12;
+        st.t++;
+        if (st.t > w * 12) { st.cx = 10 + Math.floor(Math.random()*(SIZE-30)); st.cy = 10 + Math.floor(Math.random()*(SIZE-30)); st.t = 0; }
+      } else if (bot.style === "bloom") {
+        // scattered plus-shapes
+        const shape = [[0,0],[1,0],[-1,0],[0,1],[0,-1]];
+        const s = shape[st.t % shape.length];
+        x = st.cx + s[0]; y = st.cy + s[1];
+        st.t++;
+        if (st.t % shape.length === 0) { st.cx = Math.floor(Math.random()*SIZE); st.cy = Math.floor(Math.random()*SIZE); }
+      } else { // drift: random walk
+        st.wx = Math.max(0, Math.min(SIZE-1, st.wx + (Math.floor(Math.random()*3)-1)));
+        st.wy = Math.max(0, Math.min(SIZE-1, st.wy + (Math.floor(Math.random()*3)-1)));
+        x = st.wx; y = st.wy;
+      }
+      if (housePlace(x, y, bot.color)) st.drawn++;
+    }
+  }
+}
+
+if (HOUSE_BOTS_ENABLED) {
+  setInterval(runHouseBots, 900);   // gentle pace — looks organic, not instant
+  console.log("[house bots] enabled — board will stay active");
+}
 
 app.listen(PORT, () => console.log(`pixy-board listening on :${PORT}`));
