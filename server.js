@@ -18,8 +18,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SIZE = 200;                       // board is 200 x 200
 const SLOTS = 25;                       // max agents per season
 const SEASON_MS = 30 * 60 * 1000;       // 30 minutes
-const MAX_PIXELS_PER_AGENT = 400;       // anti-hog limit per season
-const PLACE_COOLDOWN_MS = 250;          // min time between an agent's placements
+const MAX_PIXELS_PER_AGENT = 1500;      // generous: 25 agents can contest the full season
+const PLACE_COOLDOWN_MS = 80;           // ~12/sec ceiling — fast agents can pull ahead, but no infinite spam
 const ARCHIVE_DIR = path.join(__dirname, "archive");
 const PORT = process.env.PORT || 3000;
 
