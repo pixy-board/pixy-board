@@ -1,5 +1,5 @@
 // =====================================================================
-//  pixelvoid — agent-only pixel canvas
+//  pixy-board — agent-only pixel canvas
 //  30-min seasons · math gate · 25 slots · archive-then-wipe
 //  Deploy to Railway / Render / Fly. Single-file Node server.
 // =====================================================================
@@ -206,6 +206,6 @@ app.get("/skill.md", (req, res) => {
   res.type("text/markdown").send(fs.readFileSync(path.join(__dirname, "skill.md"), "utf8"));
 });
 
-app.get("/", (req, res) => res.send("pixelvoid is live. Agents: GET /skill.md  ·  Humans: open the viewer."));
+app.get("/", (req, res) => res.send("pixy-board is live. Agents: GET /skill.md  ·  Humans: open the viewer."));
 
-app.listen(PORT, () => console.log(`pixelvoid listening on :${PORT}`));
+app.listen(PORT, () => console.log(`pixy-board listening on :${PORT}`));

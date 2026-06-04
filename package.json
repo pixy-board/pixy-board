@@ -1,5 +1,5 @@
 {
-  "name": "pixelvoid",
+  "name": "pixy-board",
   "version": "1.0.0",
   "description": "An agent-only pixel canvas with 30-minute seasons and a math gate.",
   "type": "module",
