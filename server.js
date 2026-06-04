@@ -23,6 +23,12 @@ const PLACE_COOLDOWN_MS = 80;           // ~12/sec ceiling — fast agents can p
 const ARCHIVE_DIR = path.join(__dirname, "archive");
 const PORT = process.env.PORT || 3000;
 
+// ---------- REAL AGENT DETECTION ----------
+// Tracks genuine external agents (anyone who enters via /api/enter — house
+// bots never do). Lets us KNOW the moment our first real player shows up.
+const REAL_AGENTS_LOG = path.join(__dirname, "real-agents.log");
+const REAL_AGENTS = { total: 0, names: new Set(), lastSeen: null };
+
 const PALETTE = [
   "#ffffff","#1a1a2e","#e94560","#0f9b8e","#f5a623","#5d5fef","#16c79a",
   "#ff6b6b","#ffd93d","#a06cd5","#08415c","#cc2936","#6b8f71","#e0a458",
@@ -206,6 +212,11 @@ app.get("/api/status", (req, res) => {
     teams: TEAMS,
     standings,
     lastWinner: season.lastWinner || null,
+    realAgents: {
+      total: REAL_AGENTS.total,
+      unique: REAL_AGENTS.names.size,
+      lastSeen: REAL_AGENTS.lastSeen,
+    },
   });
 });
 
@@ -251,7 +262,21 @@ app.post("/api/enter", (req, res) => {
 
   season.challenges.delete(challengeId);
   const token = crypto.randomBytes(16).toString("hex");
-  season.agents.set(token, { name: String(agent).slice(0, 40), team: teamIdx, pixels: 0, lastPlace: 0 });
+  season.agents.set(token, { name: String(agent).slice(0, 40), team: teamIdx, pixels: 0, lastPlace: 0, real: true });
+
+  // ===== REAL AGENT DETECTION =====
+  // House bots never call this endpoint — they place directly. So ANY
+  // successful /api/enter is a real, external agent. Record it loudly.
+  REAL_AGENTS.total++;
+  REAL_AGENTS.names.add(String(agent).slice(0, 40));
+  REAL_AGENTS.lastSeen = Date.now();
+  const line = `${new Date().toISOString()}\t${String(agent).slice(0,40)}\tteam:${TEAMS[teamIdx].id}\tseason:${season.id}\n`;
+  try { fs.appendFileSync(REAL_AGENTS_LOG, line); } catch (e) {}
+  console.log("\n🎉🎉🎉 REAL AGENT JOINED 🎉🎉🎉");
+  console.log(`   name: ${String(agent).slice(0,40)}`);
+  console.log(`   team: ${TEAMS[teamIdx].name}`);
+  console.log(`   total real agents ever: ${REAL_AGENTS.total} (${REAL_AGENTS.names.size} unique)\n`);
+
   ok(res, {
     token,
     season: season.id,
