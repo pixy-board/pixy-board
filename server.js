@@ -344,34 +344,39 @@ app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 // =====================================================================
-//  HOUSE BOTS — keep the board alive AND demonstrate the team turf-war.
-//  Each team has a couple of bots that grow a connected mass from a home
-//  region, so the territory win-condition is visible without real agents.
-//  Set HOUSE_BOTS=off in env to disable once real agents show up.
+//  HOUSE BOTS — "ATTRACT MODE"
+//  Like an arcade cabinet's demo: the board plays a dramatic match while
+//  it waits for real agents. Three teams grow toward the center, collide,
+//  and fight over borders. Per-season momentum makes the lead swing, and
+//  growth accelerates in the final minutes for an endgame climax.
+//  All real rules respected (no overwrite, team colors, ownership).
+//  Set HOUSE_BOTS=off in env to disable once real agents take over.
 // =====================================================================
 const HOUSE_BOTS_ENABLED = process.env.HOUSE_BOTS !== "off";
 
-// home regions per team (roughly thirds of the board)
+// home regions per team (spread around the board so fronts meet in the middle)
 const HOME = [
-  { x: 45,  y: 100 },  // team 0 (Ember) - left
-  { x: 100, y: 55  },  // team 1 (Tide)  - top
-  { x: 155, y: 145 },  // team 2 (Solar) - bottom-right
+  { x: 40,  y: 100 },  // team 0 (Ember) - left
+  { x: 100, y: 40  },  // team 1 (Tide)  - top
+  { x: 150, y: 150 },  // team 2 (Solar) - bottom-right
 ];
+const CENTER = { x: SIZE / 2, y: SIZE / 2 };
+
+// two bots per team
 const HOUSE_BOTS = [
-  { name: "house.ember.a", team: 0, budget: 150 },
-  { name: "house.ember.b", team: 0, budget: 120 },
-  { name: "house.tide.a",  team: 1, budget: 150 },
-  { name: "house.tide.b",  team: 1, budget: 120 },
-  { name: "house.solar.a", team: 2, budget: 150 },
-  { name: "house.solar.b", team: 2, budget: 120 },
+  { name: "house.ember.a", team: 0 },
+  { name: "house.ember.b", team: 0 },
+  { name: "house.tide.a",  team: 1 },
+  { name: "house.tide.b",  team: 1 },
+  { name: "house.solar.a", team: 2 },
+  { name: "house.solar.b", team: 2 },
 ];
 
-// place into the season honoring ownership + team color
 function housePlace(x, y, teamIdx) {
   if (!season) return false;
   if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return false;
   const idx = y * SIZE + x;
-  if (season.board[idx] >= 0) return false;   // no overwrite
+  if (season.board[idx] >= 0) return false;   // no overwrite — the rule
   season.board[idx] = TEAMS[teamIdx].color;
   season.owner[idx] = teamIdx;
   season.pixelCount++;
@@ -379,52 +384,100 @@ function housePlace(x, y, teamIdx) {
   return true;
 }
 
+// set up per-season match state (momentum + bot frontiers) lazily
+function ensureMatchState() {
+  if (season._match) return season._match;
+  // each team gets a base "skill" plus a random edge, so seasons differ
+  const momentum = TEAMS.map(() => 0.7 + Math.random() * 0.6); // 0.7–1.3
+  const bots = {};
+  for (const bot of HOUSE_BOTS) {
+    const home = HOME[bot.team];
+    bots[bot.name] = {
+      frontier: [[
+        Math.max(0, Math.min(SIZE - 1, home.x + (Math.floor(Math.random() * 24) - 12))),
+        Math.max(0, Math.min(SIZE - 1, home.y + (Math.floor(Math.random() * 24) - 12))),
+      ]],
+    };
+  }
+  season._match = { momentum, bots, tick: 0 };
+  return season._match;
+}
+
 function runHouseBots() {
   if (!HOUSE_BOTS_ENABLED || !season) return;
-  if (Date.now() >= season.endsAt) return;
+  const now = Date.now();
+  if (now >= season.endsAt) return;
+
+  const m = ensureMatchState();
+  m.tick++;
+
+  // ---- momentum drifts over time → lead changes (the swing) ----
+  if (m.tick % 8 === 0) {
+    for (let i = 0; i < m.momentum.length; i++) {
+      m.momentum[i] += (Math.random() - 0.5) * 0.25;       // random walk
+      m.momentum[i] = Math.max(0.45, Math.min(1.5, m.momentum[i]));
+    }
+    // rubber-band: the team that's behind on territory gets a small boost
+    const terr = TEAMS.map((_, i) => biggestBlob(i));
+    const min = Math.min(...terr), max = Math.max(...terr);
+    if (max > 0) {
+      for (let i = 0; i < terr.length; i++) {
+        if (terr[i] === min) m.momentum[i] += 0.08;        // comeback help
+        if (terr[i] === max) m.momentum[i] -= 0.05;        // leader cools
+      }
+    }
+  }
+
+  // ---- endgame climax: accelerate as the clock runs down ----
+  const frac = (now - season.startedAt) / SEASON_MS;        // 0→1 through season
+  const climax = frac > 0.8 ? 2.2 : frac > 0.6 ? 1.5 : 1.0; // final third heats up
 
   for (const bot of HOUSE_BOTS) {
-    season._house = season._house || {};
-    const home = HOME[bot.team];
-    const st = season._house[bot.name] || (season._house[bot.name] = {
-      drawn: 0,
-      // each bot grows a blob seeded near its team home
-      seedx: home.x + (Math.floor(Math.random()*30)-15),
-      seedy: home.y + (Math.floor(Math.random()*30)-15),
-      frontier: null,
-    });
-    if (st.drawn >= bot.budget) continue;
-    // initialize frontier from the seed
-    if (!st.frontier) {
-      st.frontier = [[Math.max(0,Math.min(SIZE-1,st.seedx)), Math.max(0,Math.min(SIZE-1,st.seedy))]];
+    const st = m.bots[bot.name];
+    if (!st.frontier.length) {
+      // exhausted — reseed near home to keep fighting
+      const home = HOME[bot.team];
+      st.frontier.push([
+        Math.max(0, Math.min(SIZE - 1, home.x + (Math.floor(Math.random() * 30) - 15))),
+        Math.max(0, Math.min(SIZE - 1, home.y + (Math.floor(Math.random() * 30) - 15))),
+      ]);
     }
 
-    // grow the connected mass outward (organic blob, not scatter)
-    for (let k = 0; k < 4 && st.drawn < bot.budget && st.frontier.length; k++) {
-      // pick a random frontier cell to expand from
-      const fi = Math.floor(Math.random() * st.frontier.length);
+    // pixels this tick = base × team momentum × climax
+    const budget = Math.max(1, Math.round(2 * m.momentum[bot.team] * climax));
+
+    for (let k = 0; k < budget && st.frontier.length; k++) {
+      // bias frontier choice toward cells closer to CENTER → teams collide & fight
+      let fi = Math.floor(Math.random() * st.frontier.length);
+      if (st.frontier.length > 4 && Math.random() < 0.6) {
+        // pick the frontier cell nearest the center from a small sample
+        let best = fi, bestD = Infinity;
+        for (let s = 0; s < 5; s++) {
+          const j = Math.floor(Math.random() * st.frontier.length);
+          const [cx, cy] = st.frontier[j];
+          const d = (cx - CENTER.x) ** 2 + (cy - CENTER.y) ** 2;
+          if (d < bestD) { bestD = d; best = j; }
+        }
+        fi = best;
+      }
       const [fx, fy] = st.frontier[fi];
-      // try to place it
       if (housePlace(fx, fy, bot.team)) {
-        st.drawn++;
-        // add neighbors to frontier
-        const nbrs = [[fx+1,fy],[fx-1,fy],[fx,fy+1],[fx,fy-1]];
+        // expand frontier into empty neighbors (claimed/enemy cells block → border fight)
+        const nbrs = [[fx + 1, fy], [fx - 1, fy], [fx, fy + 1], [fx, fy - 1]];
         for (const [nx, ny] of nbrs) {
-          if (nx>=0&&ny>=0&&nx<SIZE&&ny<SIZE) {
-            const nidx = ny*SIZE+nx;
-            if (season.board[nidx] < 0) st.frontier.push([nx, ny]);
+          if (nx >= 0 && ny >= 0 && nx < SIZE && ny < SIZE) {
+            if (season.board[ny * SIZE + nx] < 0) st.frontier.push([nx, ny]);
           }
         }
       }
-      // remove the used frontier cell
       st.frontier.splice(fi, 1);
     }
   }
 }
 
 if (HOUSE_BOTS_ENABLED) {
-  setInterval(runHouseBots, 900);   // gentle pace — looks organic, not instant
-  console.log("[house bots] enabled — board will stay active");
+  setInterval(runHouseBots, 900);   // organic pace; climax accelerates the volume, not the tick
+  console.log("[house bots] attract mode enabled — the board plays itself");
 }
 
 app.listen(PORT, () => console.log(`pixy-board listening on :${PORT}`));
