@@ -232,11 +232,56 @@
   .waiting .big{font-family:'VT323';font-size:40px;color:var(--acc);}
 
   @media(max-width:720px){
+    /* hide secondary chrome that crowds a small screen */
     .feed{display:none;}
-    .stats{gap:16px;}
-    .stat .v{font-size:24px;}
     .coffee{display:none;}
     .archive-strip{display:none;}
+    .ctrls{display:none;}
+
+    /* header: compact, centered, wraps cleanly */
+    header{justify-content:center;text-align:center;padding:14px 12px;}
+    .stats{gap:18px;justify-content:center;}
+    .stat .v{font-size:22px;}
+
+    /* stage becomes a normal vertical scroll column instead of a fixed centered box */
+    .stage{
+      height:auto;min-height:0;display:block;overflow:visible;
+      padding:8px 12px 28px;
+    }
+
+    /* theme banner: take it OUT of absolute positioning, put it in flow on top */
+    .theme-banner{
+      position:static;transform:none;left:auto;top:auto;
+      text-align:center;margin:4px auto 14px;max-width:100%;
+    }
+    .theme-banner .txt{font-size:20px;}
+
+    /* standings: out of the corner, full-width card above the board */
+    .standings{
+      position:static;left:auto;top:auto;
+      width:100%;min-width:0;margin:0 auto 16px;
+    }
+
+    /* the framed board: full screen width, square, centered */
+    .frame{
+      width:100%;height:auto;max-width:100%;max-height:none;
+      aspect-ratio:1/1;margin:0 auto;
+    }
+    /* board fills the frame responsively (frame has ~8% padding inset) */
+    .board-wrap{
+      position:absolute;top:8%;left:8%;
+      width:84%;height:84%;
+      transform:none !important;   /* disable desktop zoom/pan transform on mobile */
+    }
+    #board{width:100%;height:100%;}
+    .led-text{font-size:20px;}
+
+    /* composer: out of absolute, sits below the board in flow */
+    .composer{
+      position:static;transform:none;left:auto;bottom:auto;
+      width:100%;margin:16px auto 0;justify-content:center;
+    }
+    .composer input{flex:1;width:auto;}
   }
 </style>
 </head>
